@@ -1,0 +1,213 @@
+args <- commandArgs(TRUE)
+parmfile <- args[1]
+linestart <- args[2]
+linestop <- args[3]
+run_no <- args[4]
+
+library(lmtest)
+
+
+nrep=100 #Number of simulation repetitions per parameter set
+
+
+# #Code for how parameter matrix is generated:
+# fineness=.005
+# efseq <- seq(1.05,1.3,by=fineness)
+# eureffectsize <- c("matching","null","weaker","stronger","euronly")
+# afmaf <- c(0.1,0.2, 0.3,0.4)
+# eurmaf <- c("smaller","larger","same")
+# admixturegroup <- c(0.5,0.8)
+# N <- c(12000)
+# prevalence <- c(0.1,0.2)
+# parameter_matrix  <- expand.grid(efseq,eureffectsize,afmaf,eurmaf,admixturegroup,N,prevalence, KEEP.OUT.ATTRS = TRUE, stringsAsFactors = FALSE)
+# names(parameter_matrix) <- c("afeffectsize","eureffectsize","afmaf","eurmaf","admixturegroup","N","prevalence")
+# write.csv(parameter_matrix,file="parameter_matrix.csv",row.names=F)
+
+#Load parameter matrix
+ parameter_matrix <- read.csv(parmfile,header=T,stringsAsFactors=F)
+
+#Only process these lines
+ parameter_matrix <- parameter_matrix[c(linestart:linestop),]
+
+#Add two columns to parameter matrix, which are used to save power info
+ parameter_matrix$power_newanc <- NA
+ parameter_matrix$power_oldanc <- NA
+ 
+#Finnish paper
+#https://www.biorxiv.org/content/early/2018/09/18/014001.full.pdf
+
+# For an individual:
+# Assign ancestry based on admixture proportion (binomial distribution), with admixture proportion prior (0 ,.25,.5,.75,1) - perhaps just need .75?
+# Assume equal allele frequency f in ancestral population 1, 
+# sample allele types based on ancestry
+# generate phenotype value using a binomial distribution #I think this is the critical flaw assuming polygenicity?
+
+#Simulated a locus for a population of admixed individuals
+#Simualted overall admixture  from a beta distribution with shape parameters shape1=7.76 ,shape2= 2.17, based on fitdist of our overall AAM population.
+#Ancestry at the ordered haplotype of the locus was drawn from a binomial distribution, with p=the subject's overall admixture proportion.
+#Genotype at each haplotype of the locus drawn from a binomial distribution with p = MAF. In this case, MAF = 20%.
+#Calculated for each individual the number of copies of the risk allele coming from each ancestry background. I.e. this is the product of ancestral haplotype and indid
+
+#Following the model design in asaMap, .
+#Simulated a phenotype with 10% prevalence in the allele-less population, with a 1.3 odds ratio in African Americans log additive effect, no effect in Europeans, equal allele frequencies between groups,
+#Disease status drawn from a binomial distribution with p=probability of disease
+#sampled from population until found requisite N of cases and controls.
+
+
+for (lineread in 1:dim(parameter_matrix)[1])
+{
+ #Pull settings from parameter matrix
+ afeffectsize_parm   <- parameter_matrix[lineread,]$afeffectsize
+ eureffectsize_parm  <- parameter_matrix[lineread,]$eureffectsize
+ afmaf_parm          <- parameter_matrix[lineread,]$afmaf
+ eurmaf_parm         <- parameter_matrix[lineread,]$eurmaf
+ admixturegroup_parm <- parameter_matrix[lineread,]$admixturegroup 
+ N_parm              <- parameter_matrix[lineread,]$N
+ prevalence_parm     <- parameter_matrix[lineread,]$prevalence 
+
+  #This matrix will store all simulation results, which will be summarized later
+  powersim <- matrix(ncol=2,nrow=nrep)
+  
+  #Each iteration on the following loop is an individual simulation, given the current parameters
+
+
+   #Sample 8 times as many individuals as you want N, otherwise case control wont work at a given prevalence..
+   individuals <- as.data.frame(matrix(ncol=6,nrow=N_parm*30))
+   names(individuals) <- c("Admixture","Ancestry1","Ancestry2","Allele1","Allele2","Phenotype")
+   #Draw admixture from a beta distribution following our sample admixture
+   
+   if(admixturegroup_parm == 0.8)
+   {
+    individuals$Admixture <- rbeta(n=length(individuals$Admixture), shape1=7.75815060  ,shape2= 2.16809238) # runif(n=length(individuals$Admixture),.5,1) #Make a gradient following a uniform distribution. Can alter models later.
+   } else if ( admixturegroup_parm == 0.5)
+   { 
+    individuals$Admixture <- rbeta(n=length(individuals$Admixture), shape1=2.16809238  ,shape2= 2.16809238) #Set a= b so that expected admixture is 30%, with equal dispersion to first population
+   } else {print ("Warning! Admixture parameter out of range!")}
+
+   #If we find weakly admixed people, just delete them
+   #Forget it, this happens too rarely to care about. just accept that this is some misclassifciation
+   #try(individuals <-  individuals[-which(individuals$Admixture < .1),],silent=FALSE)
+   
+   #Assign ordered ancestry haplotypes based on probability of admixture
+   individuals$AncestryHap1 <- rbinom(n=length(individuals$Admixture),size=1,p=individuals$Admixture) 
+   individuals$AncestryHap2 <- rbinom(n=length(individuals$Admixture),size=1,p=individuals$Admixture) 
+
+
+   #Individual probability of having an allele is drawn from the MAF of each ancestry group, assigned to them based on if they have that ancestor or not
+   if(eurmaf_parm == "same")
+   {
+    eurmaf_parm1 <- afmaf_parm
+   } else  if(eurmaf_parm == "smaller")
+   {
+    eurmaf_parm1 <- afmaf_parm *.5
+   } else if(eurmaf_parm == "larger")
+   {
+    eurmaf_parm1 <- afmaf_parm * 1.5
+   } else { print ("European MAF parameter out of range?")}
+   
+   
+      
+
+   individuals$Allele1Freq <- as.numeric(sign(individuals$AncestryHap1))*afmaf_parm + as.numeric(!sign(individuals$AncestryHap1))*eurmaf_parm1
+   individuals$Allele2Freq <- as.numeric(sign(individuals$AncestryHap2))*afmaf_parm + as.numeric(!sign(individuals$AncestryHap2))*eurmaf_parm1
+    
+   #Pull individual alleles randomly from a binomial distribution
+   individuals$AlleleHap1   <- rbinom(n=length(individuals$Admixture),size=1,p=individuals$Allele1Freq) 
+   individuals$AlleleHap2   <- rbinom(n=length(individuals$Admixture),size=1,p=individuals$Allele2Freq)
+
+   #Calculate number of copies of the risk allele on ancestry background A
+   individuals$N_copies_ancA_hap1 <- individuals$AncestryHap1 * individuals$AlleleHap1 
+   individuals$N_copies_ancA_hap2 <- individuals$AncestryHap2 * individuals$AlleleHap2 
+   individuals$N_copies_ancA <- individuals$N_copies_ancA_hap1 + individuals$N_copies_ancA_hap2 
+
+   #Calculate number of copies of the risk allele on ancestry background B
+   #Since I'm using a negation (!) code, it is recoded TRUE/FALSE. 
+   #However with logic, FALSE*FALSE = TRUE, which I actually don't want here. I want it to be FALSE, so I convert back to 0/1 to achieve that
+   
+   individuals$N_copies_ancB_hap1 <- sign(!(individuals$AncestryHap1)) * individuals$AlleleHap1 
+   individuals$N_copies_ancB_hap2 <- sign(!(individuals$AncestryHap2)) * individuals$AlleleHap2 
+   individuals$N_copies_ancB <- individuals$N_copies_ancB_hap1 + individuals$N_copies_ancB_hap2 
+
+   #Calculate total N copies of the risk allele without regard to ancestry
+   individuals$N_copies <- individuals$AlleleHap1  + individuals$AlleleHap2
+
+   #Diagnostic code:
+   #table(individuals$N_copies)
+   #table(individuals$N_copies_ancA,individuals$N_copies_ancB) #Upper triangle should be nonzeros, i.e. there should be people with 0 copies from both, etc. 
+
+   #Code risk probabilities
+   if(eureffectsize_parm == "matching")
+   {
+    #Match effect of Eur and AFR
+    relative_risk_anca=log(afeffectsize_parm) 
+    relative_risk_ancb=log(afeffectsize_parm) 
+   } else if(eureffectsize_parm == "null")
+   {
+    #Give no effect to eur
+    relative_risk_anca=log(afeffectsize_parm) 
+    relative_risk_ancb=0
+   }else if(eureffectsize_parm == "weaker")
+   {
+   #Set effect size to 70% of AF effect size, an ultimately arbitrary selection
+    relative_risk_anca=log(afeffectsize_parm) 
+    relative_risk_ancb=log(afeffectsize_parm) *0.7 
+   } else if(eureffectsize_parm == "stronger")
+   {
+   #Set effect size to 30% of higher than AF effect size, an ultimately arbitrary selection
+    relative_risk_anca=log(afeffectsize_parm) 
+    relative_risk_ancb=log(afeffectsize_parm) *1.3
+   }else if(eureffectsize_parm == "euronly")
+   {
+    #Make it so effect is acutally in Eur only
+    relative_risk_anca=0
+    relative_risk_ancb=log(afeffectsize_parm) 
+   }
+
+   #Right now admixture increases risk on log scale by 0.5 (or = 1.6, seems plausible?), hence disease prevalence increases as a function of admixture
+   #In other words, a completely african indivudal has 1.6x the odds of a complete european individual. seems plausible?
+   
+   admixture_risk=.5
+   
+   intercept=-log(1/prevalence_parm - 1) #Translate prevalence into a logistic model intercept
+
+   eabx=intercept + admixture_risk*individuals$Admixture  +  individuals$N_copies_ancA*relative_risk_anca + individuals$N_copies_ancB*relative_risk_ancb # + rnorm(length(individuals$Admixture),sd=sqrt(5)) # + individuals$Admixture*admixture_risk 
+   #Prevalence needs to be adjusted so that its the population prevalence, i.e. individuals without risk allele?
+   #in other words, must be set so that the even when trait are all 0, probabiltiy of disease is the prevalence, this is the intercept i calculated at -2.19
+   
+   #Individual probabiltiy of disease
+   pdis <- 1/(1+exp(-eabx))
+   
+   #Draw phenotypes
+   individuals$Phenotype  <- rbinom(n=length(individuals$Admixture),size=1, p=pdis) #Should this even be drawn? or is risk of disease anyway here? following a liability threshold...
+
+   for (i in 1:nrep)
+   {
+
+   #resample individuals to have cases and 2.5 controls for eachcase
+   cases <- which(individuals$Phenotype == 1)
+   controls <- which(individuals$Phenotype == 0)
+   nmult <- N_parm*2.5
+   casepick <- sample(cases,replace=TRUE)[1:N_parm]
+   conpick <- sample(controls,replace=TRUE)[1:nmult]
+    
+   individuals2 <- individuals[c(casepick,conpick),]
+   
+   #Model risk
+   m1  <- lm(Phenotype ~ N_copies_ancA + N_copies_ancB + Admixture,data=individuals2)#,family='binomial')
+   m1a <- lm(Phenotype ~ N_copies + Admixture,data=individuals2)#,,family='binomial')
+   m2  <- lm(Phenotype ~ Admixture,data=individuals2)#,,family='binomial')
+
+  #Power of our model
+   powersim[i,1] <- lrtest(m1,m2)[2,5]
+  #Power of default model
+   powersim[i,2] <- lrtest(m1a,m2)[2,5]
+  }
+
+ #store the power information
+  parameter_matrix[lineread,]$power_newanc <- length(which(powersim[,1] < 5e-8))
+  parameter_matrix[lineread,]$power_oldanc <- length(which(powersim[,2] < 5e-8))
+
+}
+
+
+write.table(parameter_matrix,file=paste('sims_jan2/power500sims',linestart,"_",linestop,'_run',run_no,'.txt',sep=''),row.names=F)
